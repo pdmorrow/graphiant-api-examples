@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
+#
+# A simple peering service CLI which makes use of the Graphiant SDK.
+#
+# A peering service is a Graphiant concept which allows prefix consumption
+# between enterprises with optional overlapping address spaces.
 
-import datetime
-import json
-from typing import Dict, List
+from ipaddress import IPv4Network
+from typing import Any, Dict, List, Optional
 import click
 from rich.table import Table
 from rich.console import Console
 
 import peering_services
-
-
-def epoch_to_utc(seconds: int, nanos: int) -> str:
-    dt = datetime.datetime.fromtimestamp(
-        seconds + nanos / 1e9, tz=datetime.timezone.utc
-    )
-    return dt.strftime("%Y-%m-%dT%H:%M")
-
-
-def readable_status(status: str) -> str:
-    return status.split("_")[-1]
-
-
-def short_peer_type(peer_type: str) -> str:
-    if peer_type == "non_graphiant_peer":
-        return "External"
-    else:
-        return "Graphiant"
+from utils import readable_status, short_peer_type, epoch_to_utc
 
 
 @click.group()
 def cli():
-    """Examples for interacting with Graphiant peering services."""
+    """A sample application which uses the Graphiant API to introspect peering services."""
     pass
 
 
@@ -41,6 +28,144 @@ def summary():
     pass
 
 
+# --- create group ---
+@cli.group()
+def create():
+    """Commands for creating service related items."""
+    pass
+
+
+# --- summary lan-segments subcommand ---
+@summary.command()
+@click.argument("id", required=False, type=int)
+@click.option(
+    "--context",
+    "context",
+    type=click.Choice(["publisher", "proxy"], case_sensitive=False),
+    default="publisher",
+)
+def lan_segments(context: str, id: Optional[int] = None):
+    """Show all or a specific lan segment(s)"""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    if id is not None:
+        lan_segments = service_mgr.get_lan_segment_by_id(context, id=id)
+    else:
+        lan_segments = service_mgr.get_lan_segments(context)
+
+    console = Console()
+    table = Table(title="Lan Segment (VRFs)")
+
+    table.add_column("Name", style="cyan")
+    table.add_column("ID", style="purple")
+    table.add_column("Desc", style="magenta")
+    table.add_column("Created", style="blue")
+    table.add_column("Interface Refs", style="yellow")
+    table.add_column("Device Refs", style="green")
+    table.add_column("Site List Refs", style="red")
+
+    for entry in lan_segments.get("entries", []):
+        created = entry.get("createdAt", {})
+        table.add_row(
+            entry.get("name", ""),
+            str(entry.get("id")),
+            entry.get("description", ""),
+            epoch_to_utc(created.get("seconds"), created.get("nanos")),
+            str(entry.get("associatedInterfaces", "0")),
+            str(entry.get("edgeReferences", "0")),
+            str(entry.get("siteListReferences", "0")),
+        )
+
+    console.print(table)
+
+
+# --- summary devices subcommand ---
+@summary.command()
+@click.argument("id", required=False, type=int)
+@click.option(
+    "--context",
+    "context",
+    type=click.Choice(["publisher", "proxy"], case_sensitive=False),
+    default="publisher",
+)
+def devices(context, id: Optional[int] = None):
+    """Show all or a specific devices(s) for the publisher or customer"""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    edges = service_mgr.get_edges(context).get("edgesSummary", [])
+
+    console = Console()
+    table = Table(title="Devices")
+
+    table.add_column("Hostname", style="cyan")
+    table.add_column("Role", style="blue")
+    table.add_column("Status", style="red")
+    table.add_column("ID", style="purple")
+    table.add_column("Enterprise", style="magenta")
+    table.add_column("Portal Status", style="yellow")
+    table.add_column("Site", style="green")
+    table.add_column("SW Name", style="red")
+
+    for dev in edges:
+        table.add_row(
+            dev.get("hostname", ""),
+            dev.get("role", ""),
+            dev.get("status", ""),
+            str(dev.get("deviceId")),
+            str(dev.get("enterpriseId")),
+            dev.get("portalStatus", ""),
+            dev.get("site", ""),
+            dev.get("swName", ""),
+        )
+
+    console.print(table)
+
+
+# --- summary sites subcommand ---
+@summary.command()
+@click.argument("id", required=False, type=int)
+@click.option(
+    "--context",
+    "context",
+    type=click.Choice(["publisher", "proxy"], case_sensitive=False),
+    default="publisher",
+)
+def sites(context: str, id: Optional[int] = None):
+    """Show all sites for the publisher customer"""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    if id is not None:
+        sites = service_mgr.get_site_by_id(context, id=id)
+    else:
+        sites = service_mgr.get_sites(context)
+
+    console = Console()
+    table = Table(title="Sites")
+
+    table.add_column("Name", style="cyan")
+    table.add_column("ID", style="purple")
+    table.add_column("Created", style="blue")
+    table.add_column("Updated", style="yellow")
+    table.add_column("Device References", style="cyan")
+    table.add_column("Num Lan Segments", style="green")
+    table.add_column("Site List References", style="red")
+
+    for entry in sites.get("sites", []):
+        created = entry.get("createdAt", {})
+        updated = entry.get("updatedAt", {})
+        table.add_row(
+            entry.get("name", ""),
+            str(entry.get("id")),
+            epoch_to_utc(created.get("seconds"), created.get("nanos")),
+            epoch_to_utc(updated.get("seconds"), updated.get("nanos")),
+            str(entry.get("edgeCount", "0")),
+            str(entry.get("segmentCount", "0")),
+            str(entry.get("siteListReferenceCount", "0")),
+        )
+
+    console.print(table)
+
+
 # --- summary publishers subcommand ---
 @summary.command()
 @click.argument("service_id", required=False, type=int)
@@ -48,7 +173,7 @@ def publishers(service_id):
     """Show service publisher summary (optionally for a specific service)."""
     service_mgr = peering_services.PeeringServicesMgr()
 
-    services_raw = service_mgr.get_services_summary()
+    services_raw = service_mgr.get_services_summary(context="publisher")
 
     console = Console()
     table = Table(title="Peering Services")
@@ -116,7 +241,7 @@ def publishers(service_id):
 # --- summary customers subcommand ---
 @summary.command()
 @click.argument("customer_id", required=False, type=int)
-def customers(customer_id):
+def customers(customer_id: Optional[int]):
     """Show service consumer summary (optionally for a specific service)."""
     service_mgr = peering_services.PeeringServicesMgr()
 
@@ -165,11 +290,75 @@ def customers(customer_id):
     console.print(table)
 
 
+def format_ipsec_cfg(tunnel_cfg: Dict[str, Any]) -> str:
+    """
+    Format the IPSec VPN configuration for a given tunnel from the site to site VPN config.
+    """
+    s2svpn_row = f'\n  IKE Version: {tunnel_cfg.get("ikeVersion")}'
+    s2svpn_row += f'\n  IKE Auth Alg: {tunnel_cfg.get("ikeAuthenticationAlgorithm")}'
+    s2svpn_row += f'\n  IKE Enc Type: {tunnel_cfg.get("ikeEncryptionAlgorithm")}'
+    s2svpn_row += f'\n  IKE Lifetime: {tunnel_cfg.get("ikeLifetime")}'
+    s2svpn_row += f'\n  IKE DH: {tunnel_cfg.get("ikeDhAlgorithm")}'
+    s2svpn_row += f'\n  Ipsec Protocol: {tunnel_cfg.get("ipsecProtocol")}'
+    s2svpn_row += (
+        f'\n  Ipsec Auth Alg: {tunnel_cfg.get("ipsecAuthenticationAlgorithm")}'
+    )
+    s2svpn_row += f'\n  Ipsec Lifetime: {tunnel_cfg.get("ipsecLifetime")}'
+    s2svpn_row += f'\n  Ipsec Mode: {tunnel_cfg.get("ipsecMode")}'
+    s2svpn_row += f'\n  Ipsec Pfs Alg: {tunnel_cfg.get("ipsecPfsAlgorithm")}'
+    s2svpn_row += f'\n  DPD Interval: {tunnel_cfg.get("dpdInterval")}'
+    s2svpn_row += f'\n  DPD Retries: {tunnel_cfg.get("dpdRetries")}'
+    s2svpn_row += f'\n  IKE local ID: {tunnel_cfg.get("localIkeId")}'
+    s2svpn_row += f'\n  Graphiant IKE ID: {tunnel_cfg.get("graphiantIkeId")}'
+    s2svpn_row += f'\n  Local tunnel ip: {tunnel_cfg.get("localTunnelIp")}'
+    s2svpn_row += f'\n  Graphiant tunnel ip: {tunnel_cfg.get("graphiantTunnelIp")}'
+    s2svpn_row += (
+        f'\n  Graphiant outer tunnel ip: {tunnel_cfg.get("graphiantOuterTunnelIp")}'
+    )
+    s2svpn_row += f'\n  Local outer tunnel ip: {tunnel_cfg.get("localOuterTunnelIp")}'
+    s2svpn_row += f'\n  Local tunnel ipv6: {tunnel_cfg.get("localTunnelIpv6")}'
+    s2svpn_row += f'\n  Graphiant tunnel ipv6: {tunnel_cfg.get("graphiantTunnelIpv6")}'
+    return s2svpn_row
+
+
+def format_routing_cfg(routing: Dict[str, Any]) -> str:
+    """
+    Format routing information from the site to site VPN config.
+    """
+    s2svpn_row = "\nRouting"
+    static = routing.get("static", {})
+    if static:
+        s2svpn_row += "\n  Static"
+        dests = "\n      ".join(static.get("destinationPrefix", []))
+        s2svpn_row += f"\n    Destination: {dests}"
+
+    bgp = routing.get("bgp", {})
+    if bgp:
+        s2svpn_row += "\n  BGP"
+        s2svpn_row += f'\n    Send Community: {bgp.get("sendCommunity")}'
+        s2svpn_row += f'\n    Peer ASN: {bgp.get("peerAsn")}'
+        s2svpn_row += f'\n    MD5 Pass: {bgp.get("md5Password", {}).get("md5_password", "Not Set")}'
+        s2svpn_row += f'\n    Keepalive Timer: {bgp.get("keepaliveTimer")}'
+        s2svpn_row += f'\n    Hold Timer: {bgp.get("hold_timer")}'
+        afs = bgp.get("addressFamilies", {})
+        for _af, v in afs.items():
+            s2svpn_row += "\n    Ipv4:"
+            if "inboundPolicy" in v:
+                i = v.get("inboundPolicy")
+                s2svpn_row += f'\n      Inbound policy: {i.get("policy")}'
+
+            if "outboundPolicy" in v:
+                i = v.get("outboundPolicy")
+                s2svpn_row += f'\n      Outbound policy: {i.get("policy")}'
+
+    return s2svpn_row
+
+
 # --- summary services subcommand ---
 @summary.command()
 @click.option("--customer-id", "customer_id", required=False, default=None, type=int)
 @click.option("--service-id", "service_id", required=False, default=None, type=int)
-def services(service_id, customer_id):
+def services(service_id: Optional[int], customer_id: Optional[int]):
     """Show service summary (optionally for a specific service and customer)."""
     service_mgr = peering_services.PeeringServicesMgr()
 
@@ -284,78 +473,11 @@ def services(service_id, customer_id):
                         # Get the tunnel cfg.
                         for c in tunnel_cfg:
                             if c.get("ikePresharedKey", "None") == psk:
-                                s2svpn_row += f'\n  IKE Version: {c.get("ikeVersion")}'
-                                s2svpn_row += f'\n  IKE Auth Alg: {c.get("ikeAuthenticationAlgorithm")}'
-                                s2svpn_row += f'\n  IKE Enc Type: {c.get("ikeEncryptionAlgorithm")}'
-                                s2svpn_row += (
-                                    f'\n  IKE Lifetime: {c.get("ikeLifetime")}'
-                                )
-                                s2svpn_row += f'\n  IKE DH: {c.get("ikeDhAlgorithm")}'
-                                s2svpn_row += (
-                                    f'\n  Ipsec Protocol: {c.get("ipsecProtocol")}'
-                                )
-                                s2svpn_row += f'\n  Ipsec Auth Alg: {c.get("ipsecAuthenticationAlgorithm")}'
-                                s2svpn_row += (
-                                    f'\n  Ipsec Lifetime: {c.get("ipsecLifetime")}'
-                                )
-                                s2svpn_row += f'\n  Ipsec Mode: {c.get("ipsecMode")}'
-                                s2svpn_row += (
-                                    f'\n  Ipsec Pfs Alg: {c.get("ipsecPfsAlgorithm")}'
-                                )
-                                s2svpn_row += (
-                                    f'\n  DPD Interval: {c.get("dpdInterval")}'
-                                )
-                                s2svpn_row += f'\n  DPD Retries: {c.get("dpdRetries")}'
-                                s2svpn_row += f'\n  IKE local ID: {c.get("localIkeId")}'
-                                s2svpn_row += (
-                                    f'\n  Graphiant IKE ID: {c.get("graphiantIkeId")}'
-                                )
-                                s2svpn_row += (
-                                    f'\n  Local tunnel ip: {c.get("localTunnelIp")}'
-                                )
-                                s2svpn_row += f'\n  Graphiant tunnel ip: {c.get("graphiantTunnelIp")}'
-                                s2svpn_row += f'\n  Graphiant outer tunnel ip: {c.get("graphiantOuterTunnelIp")}'
-                                s2svpn_row += f'\n  Local outer tunnel ip: {c.get("localOuterTunnelIp")}'
-                                s2svpn_row += (
-                                    f'\n  Local tunnel ipv6: {c.get("localTunnelIpv6")}'
-                                )
-                                s2svpn_row += f'\n  Graphiant tunnel ipv6: {c.get("graphiantTunnelIpv6")}'
+                                s2svpn_row += format_ipsec_cfg(c)
 
                 routing = ipsec_gw.get("routing", {})
                 if routing:
-                    s2svpn_row += "\nRouting"
-                    static = routing.get("static", {})
-                    if static:
-                        s2svpn_row += "\n  Static"
-                        dests = "\n      ".join(static.get("destinationPrefix", []))
-                        s2svpn_row += f"\n    Destination: {dests}"
-
-                    bgp = routing.get("bgp", {})
-                    if bgp:
-                        s2svpn_row += "\n  BGP"
-                        s2svpn_row += (
-                            f'\n    Send Community: {bgp.get("sendCommunity")}'
-                        )
-                        s2svpn_row += f'\n    Peer ASN: {bgp.get("peerAsn")}'
-                        s2svpn_row += f'\n    MD5 Pass: {bgp.get("md5Password")}'
-                        s2svpn_row += (
-                            f'\n    Keepalive Timer: {bgp.get("keepaliveTimer")}'
-                        )
-                        s2svpn_row += f'\n    Hold Timer: {bgp.get("hold_timer")}'
-                        afs = bgp.get("addressFamilies", {})
-                        for _af, v in afs.items():
-                            s2svpn_row += "\n    Ipv4:"
-                            if "inboundPolicy" in v:
-                                i = v.get("inboundPolicy")
-                                s2svpn_row += (
-                                    f'\n      Inbound policy: {i.get("policy")}'
-                                )
-
-                            if "outboundPolicy" in v:
-                                i = v.get("outboundPolicy")
-                                s2svpn_row += (
-                                    f'\n      Outbound policy: {i.get("policy")}'
-                                )
+                    s2svpn_row += format_routing_cfg(routing)
 
                 if "tcpMss" in ipsec_gw:
                     s2svpn_row += f'\nTCP MSS: {ipsec_gw.get("tcpMss")}'
@@ -374,6 +496,56 @@ def services(service_id, customer_id):
             )
 
     console.print(table)
+
+
+# --- create publisher subcommand ---
+@create.command()
+@click.argument("name", required=True, type=str)
+@click.argument("description", required=False, type=str)
+@click.argument(
+    "service-lan-segment",
+    required=True,
+    type=str,
+)
+@click.option(
+    "--site", required=True, multiple=True, help="The site the service is attached to."
+)
+@click.option(
+    "--prefix-and-tag",
+    required=True,
+    multiple=True,
+    help='Add a service prefix and optional tag. This option may be repeated and should take the form "10.0.2.0/24,Tag" if a tag is required, otherwise just specify the prefix.',
+)
+def publisher(
+    name: str,
+    description: str,
+    service_lan_segment: str,
+    site,
+    prefix_and_tag,
+):
+    """Create a peering service publisher."""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    prefixes_and_tags = []
+    for pt in prefix_and_tag:
+        e = pt.split(",")
+        prefix = e[0]
+        if len(e) > 1:
+            tag = e[1]
+        else:
+            tag = None
+
+        prefixes_and_tags.append((IPv4Network(prefix), tag))
+
+    sites = [s for s in site]
+
+    service_mgr.create_producer(
+        name,
+        desc=description,
+        service_lan_seg=service_lan_segment,
+        site_names=sites,
+        prefix_and_tag_set=prefixes_and_tags,
+    )
 
 
 if __name__ == "__main__":

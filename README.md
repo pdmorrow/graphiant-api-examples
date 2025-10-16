@@ -1,3 +1,8 @@
-# Peering Service Example.
+# Graphiant API Examples.
 
-This application demonstrates how to work with peering services.
+A set of basic command line tools which demonstrate use of the graphiant
+api and/or playbooks.
+
+## Peering Services
+
+[Peering services](peering_service/README.md)
