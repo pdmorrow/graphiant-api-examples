@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+
+import datetime
+import json
+from typing import Dict, List
+import click
+from rich.table import Table
+from rich.console import Console
+
+import peering_services
+
+
+def epoch_to_utc(seconds: int, nanos: int) -> str:
+    dt = datetime.datetime.fromtimestamp(
+        seconds + nanos / 1e9, tz=datetime.timezone.utc
+    )
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def readable_status(status: str) -> str:
+    return status.split("_")[-1]
+
+
+def short_peer_type(peer_type: str) -> str:
+    if peer_type == "non_graphiant_peer":
+        return "External"
+    else:
+        return "Graphiant"
+
+
+@click.group()
+def cli():
+    """Examples for interacting with Graphiant peering services."""
+    pass
+
+
+# --- summary group ---
+@cli.group()
+def summary():
+    """Commands for displaying service related items."""
+    pass
+
+
+# --- summary publishers subcommand ---
+@summary.command()
+@click.argument("service_id", required=False, type=int)
+def publishers(service_id):
+    """Show service publisher summary (optionally for a specific service)."""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    services_raw = service_mgr.get_services_summary()
+
+    console = Console()
+    table = Table(title="Peering Services")
+
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("ID", style="magenta")
+    table.add_column("Status", style="green")
+    table.add_column("Created", style="blue")
+    table.add_column("Updated", style="blue")
+    table.add_column("Matched Customers", style="red")
+    table.add_column("LAN Seg", style="green")
+
+    table.add_column("Sites", style="blue")
+    table.add_column("Prefixes (Tags)", style="green")
+    table.add_column("Routing Policy", style="red")
+
+    if service_id is None:
+        services = services_raw.get("info", [])
+    else:
+        services = [
+            s for s in services_raw.get("info", []) if s.get("id", -1) == service_id
+        ]
+
+    for service in services:
+        created = service.get("createdAt", {})
+        updated = service.get("updatedAt", {})
+
+        id = service.get("id", -1)
+
+        details = service_mgr.get_producer_details(id=id)
+        policy = details.get("policy", {}).get("policy", {})
+        sites = []
+        for s in policy.get("sites", []):
+            ss = s.get("sites", [])
+            for sid in ss:
+                sites.append(str(sid))
+
+        prefixes = []
+        for p in policy.get("prefixTags", []):
+            e = f'{p.get("prefix")} ({p.get("tag", "None")})'
+            prefixes.append(e)
+
+        routing_policies = []
+        for device, r in policy.get("globalObjectDeviceSummaries", {}).items():
+            for rp in r.get("routingPolicies", []):
+                rpstr = f'{device}\n  {rp.get("name")} ({rp.get("id")})'
+                routing_policies.append(rpstr)
+
+        table.add_row(
+            service.get("name", "unknown"),
+            str(id),
+            readable_status(service.get("status", "unknown")),
+            epoch_to_utc(created.get("seconds"), created.get("nanos")),
+            epoch_to_utc(updated.get("seconds"), updated.get("nanos")),
+            str(service.get("matchedCustomers")),
+            str(service.get("lanSegment", -1)),
+            "\n".join([s for s in sites]),
+            "\n".join([p for p in prefixes]),
+            "\n".join([rp for rp in routing_policies]),
+        )
+
+    console.print(table)
+
+
+# --- summary customers subcommand ---
+@summary.command()
+@click.argument("customer_id", required=False, type=int)
+def customers(customer_id):
+    """Show service consumer summary (optionally for a specific service)."""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    customers_raw = service_mgr.get_customer_summary()
+
+    console = Console()
+    table = Table(title="Customers")
+
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("ID", style="magenta")
+    table.add_column("Admins", style="yellow")
+    table.add_column("Type", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Updated", style="blue")
+    table.add_column("Matched Services", style="red")
+
+    for c in customers_raw.get("customers", []):
+        id = c.get("id")
+        if customer_id is not None and id != customer_id:
+            continue
+
+        admins = "\n".join([a for a in c.get("adminEmails", [])])
+        updated = c.get("updatedAt", {})
+        match_details = service_mgr.get_customer_match_details(customer_id=id)
+        ms = []
+        for service in match_details.get("services", []):
+            ms.append(
+                f'{service.get("name")}\n  id: {service.get("id")}\n  status: {readable_status(service.get("status"))}'
+            )
+
+        if ms:
+            matched_services = "\n".join(ms)
+        else:
+            matched_services = "None"
+
+        table.add_row(
+            c.get("name"),
+            str(c.get("id", -1)),
+            admins,
+            c.get("type"),
+            readable_status(c.get("status")),
+            epoch_to_utc(updated.get("seconds"), updated.get("nanos")),
+            matched_services,
+        )
+
+    console.print(table)
+
+
+# --- summary services subcommand ---
+@summary.command()
+@click.option("--customer-id", "customer_id", required=False, default=None, type=int)
+@click.option("--service-id", "service_id", required=False, default=None, type=int)
+def services(service_id, customer_id):
+    """Show service summary (optionally for a specific service and customer)."""
+    service_mgr = peering_services.PeeringServicesMgr()
+
+    if customer_id is None:
+        customers_raw = service_mgr.get_customer_summary()
+        customer_ids = [c.get("id", -1) for c in customers_raw.get("customers", [])]
+    else:
+        customer_ids = [customer_id]
+
+    # Map of customer id's to a set of associated publisher service ids.
+    cust_service_id_map: Dict[int, List[int]] = {}
+    for cid in customer_ids:
+        customer_details = service_mgr.get_customer_match_details(cid)
+        for service in customer_details.get("services", []):
+            id = service.get("id", -1)
+            if service_id is not None:
+                if id == service_id:
+                    service_ids = cust_service_id_map.get(cid, [])
+                    service_ids.append(id)
+                    cust_service_id_map[cid] = service_ids
+                    break
+            else:
+                service_ids = cust_service_id_map.get(cid, [])
+                service_ids.append(id)
+                cust_service_id_map[cid] = service_ids
+
+    console = Console()
+    table = Table(title="Matched Services")
+
+    table.add_column("Service", style="cyan", no_wrap=True)
+    table.add_column("Customer", style="purple")
+    table.add_column("Sites", style="blue")
+    table.add_column("Lan Seg", style="red")
+    table.add_column("Service Prefixes", style="yellow")
+    table.add_column("Consumer Prefixes", style="purple")
+    table.add_column("VPN", style="blue")
+
+    for cid, sids in cust_service_id_map.items():
+        for sid in sids:
+            details = service_mgr.get_customer_details(cid, sid)
+            if "errorCode" in details:
+                print(f'Warning: {details.get("detailedError")}')
+                continue
+
+            match_details = details.get("matchDetails", {})
+            customer = match_details.get("customer")
+            publisher = match_details.get("service")
+            publisher_contacts = "\n".join(
+                [c for c in publisher.get("contactEmail", [])]
+            )
+            publisher_details = f'Name: {publisher.get("serviceName", "Unknown")}\nId: {publisher.get("id", -1)}\nDescription: {publisher.get("description", "None")}\nCompany: {publisher.get("companyName")}\nContacts: {publisher_contacts}'
+            publisher_details += f'Status: {readable_status(details.get("status"))}\nType: {short_peer_type(details.get("peerType"))}'
+
+            emails = "\n  ".join(customer.get("emails", []))
+            customer_row = f'ID: {customer.get("id")}\nName: {customer.get("companyName")}\nEmails: {emails}\nNum Sites: {customer.get("numSites")}'
+
+            site_info = details.get("siteInformation", [])
+            sites = []
+            for s in site_info:
+                si = s.get("sites", [])
+                for site in si:
+                    sites.append(str(site))
+
+            site_row = "\n".join(sites)
+
+            lan_segs = []
+            for policy in details.get("policy", []):
+                lan_segs.append(str(policy.get("lanSegment", "None")))
+
+            lan_seg_row = "\n".join(lan_segs)
+
+            service_prefixes_entries = []
+            service_prefixes = match_details.get("servicePrefixes", [])
+            for spfx in service_prefixes:
+                # Dnat from customerTranlatedPrefix to prefix.
+                if "customerTranslatedPrefix" in spfx:
+                    s = f'I:{spfx.get("customerTranslatedPrefix", "None")}\n  -> O:{spfx.get("prefix")} ({spfx.get("tag", "None")})'
+                else:
+                    s = f'{spfx.get("prefix")}, T:{spfx.get("tag")}'
+
+                service_prefixes_entries.append(s)
+
+            consumer_prefixes_row = "\n".join(
+                [p for p in match_details.get("consumerPrefixes", [])]
+            )
+            service_prefixes_row = "\n".join(service_prefixes_entries)
+
+            s2svpn = details.get("siteToSiteVpn", {})
+            s2svpn_emails = "\n  ".join([e for e in s2svpn.get("emails", [])])
+            s2svpn_row = (
+                f'Emails: {s2svpn_emails}\nRegionId: {s2svpn.get("regionId", -1)}'
+            )
+
+            tunnel_cfg = details.get("ipsecTunnelConfig", [])
+
+            ipsec_gw = s2svpn.get("ipsecGatewayDetails", {})
+            if ipsec_gw:
+                s2svpn_row += f'\nName: {ipsec_gw.get("name", "unknown")}\nDestination: {ipsec_gw.get("destinationAddress", "unknown")}\nIKE Initiator: {ipsec_gw.get("ikeInitiator", "unknown")}'
+                s2svpn_row += f'\nVPN Profile: {ipsec_gw.get("vpnProfile", "unknown")}'
+                for t in ["tunnel1", "tunnel2"]:
+                    tunnel = ipsec_gw.get(t, {})
+                    if tunnel:
+                        s2svpn_row += f"\nTunnel {t[-1:]}"
+                        s2svpn_row += (
+                            f'\n  Inside Ipv4: {tunnel.get("insideIpv4Cidr", "None")}'
+                        )
+                        s2svpn_row += (
+                            f'\n  Inside Ipv6: {tunnel.get("insideIpv6Cidr", "None")}'
+                        )
+                        psk = tunnel.get("psk", "None")
+                        s2svpn_row += f"\n  PSK: {psk}"
+                        # Get the tunnel cfg.
+                        for c in tunnel_cfg:
+                            if c.get("ikePresharedKey", "None") == psk:
+                                s2svpn_row += f'\n  IKE Version: {c.get("ikeVersion")}'
+                                s2svpn_row += f'\n  IKE Auth Alg: {c.get("ikeAuthenticationAlgorithm")}'
+                                s2svpn_row += f'\n  IKE Enc Type: {c.get("ikeEncryptionAlgorithm")}'
+                                s2svpn_row += (
+                                    f'\n  IKE Lifetime: {c.get("ikeLifetime")}'
+                                )
+                                s2svpn_row += f'\n  IKE DH: {c.get("ikeDhAlgorithm")}'
+                                s2svpn_row += (
+                                    f'\n  Ipsec Protocol: {c.get("ipsecProtocol")}'
+                                )
+                                s2svpn_row += f'\n  Ipsec Auth Alg: {c.get("ipsecAuthenticationAlgorithm")}'
+                                s2svpn_row += (
+                                    f'\n  Ipsec Lifetime: {c.get("ipsecLifetime")}'
+                                )
+                                s2svpn_row += f'\n  Ipsec Mode: {c.get("ipsecMode")}'
+                                s2svpn_row += (
+                                    f'\n  Ipsec Pfs Alg: {c.get("ipsecPfsAlgorithm")}'
+                                )
+                                s2svpn_row += (
+                                    f'\n  DPD Interval: {c.get("dpdInterval")}'
+                                )
+                                s2svpn_row += f'\n  DPD Retries: {c.get("dpdRetries")}'
+                                s2svpn_row += f'\n  IKE local ID: {c.get("localIkeId")}'
+                                s2svpn_row += (
+                                    f'\n  Graphiant IKE ID: {c.get("graphiantIkeId")}'
+                                )
+                                s2svpn_row += (
+                                    f'\n  Local tunnel ip: {c.get("localTunnelIp")}'
+                                )
+                                s2svpn_row += f'\n  Graphiant tunnel ip: {c.get("graphiantTunnelIp")}'
+                                s2svpn_row += f'\n  Graphiant outer tunnel ip: {c.get("graphiantOuterTunnelIp")}'
+                                s2svpn_row += f'\n  Local outer tunnel ip: {c.get("localOuterTunnelIp")}'
+                                s2svpn_row += (
+                                    f'\n  Local tunnel ipv6: {c.get("localTunnelIpv6")}'
+                                )
+                                s2svpn_row += f'\n  Graphiant tunnel ipv6: {c.get("graphiantTunnelIpv6")}'
+
+                routing = ipsec_gw.get("routing", {})
+                if routing:
+                    s2svpn_row += "\nRouting"
+                    static = routing.get("static", {})
+                    if static:
+                        s2svpn_row += "\n  Static"
+                        dests = "\n      ".join(static.get("destinationPrefix", []))
+                        s2svpn_row += f"\n    Destination: {dests}"
+
+                    bgp = routing.get("bgp", {})
+                    if bgp:
+                        s2svpn_row += "\n  BGP"
+                        s2svpn_row += (
+                            f'\n    Send Community: {bgp.get("sendCommunity")}'
+                        )
+                        s2svpn_row += f'\n    Peer ASN: {bgp.get("peerAsn")}'
+                        s2svpn_row += f'\n    MD5 Pass: {bgp.get("md5Password")}'
+                        s2svpn_row += (
+                            f'\n    Keepalive Timer: {bgp.get("keepaliveTimer")}'
+                        )
+                        s2svpn_row += f'\n    Hold Timer: {bgp.get("hold_timer")}'
+                        afs = bgp.get("addressFamilies", {})
+                        for _af, v in afs.items():
+                            s2svpn_row += "\n    Ipv4:"
+                            if "inboundPolicy" in v:
+                                i = v.get("inboundPolicy")
+                                s2svpn_row += (
+                                    f'\n      Inbound policy: {i.get("policy")}'
+                                )
+
+                            if "outboundPolicy" in v:
+                                i = v.get("outboundPolicy")
+                                s2svpn_row += (
+                                    f'\n      Outbound policy: {i.get("policy")}'
+                                )
+
+                if "tcpMss" in ipsec_gw:
+                    s2svpn_row += f'\nTCP MSS: {ipsec_gw.get("tcpMss")}'
+
+                if "mtu" in ipsec_gw:
+                    s2svpn_row += f'\nMTU: {ipsec_gw.get("mtu")}'
+
+            table.add_row(
+                publisher_details,
+                customer_row,
+                site_row,
+                lan_seg_row,
+                service_prefixes_row,
+                consumer_prefixes_row,
+                s2svpn_row,
+            )
+
+    console.print(table)
+
+
+if __name__ == "__main__":
+    cli()

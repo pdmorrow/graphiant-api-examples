@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "peering-service"
+version = "0.1.0"
+description = ""
+authors = ["Peter Morrow <peter@graphiant.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+click = "^8.3.0"
+graphiant-sdk = "^25.10.1"
+ruff = "^0.14.0"
+mypy = "^1.18.2"
+pylint = "^3.3.9"
+black = "^25.9.0"
+rich = "^14.1.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
